@@ -13,7 +13,7 @@ run: $(UPTODATE)
 	  --name $(IMAGE) \
 	  $(IMAGE)
 
-$(UPTODATE): Dockerfile http-statistics.py http-requests.c
+$(UPTODATE): Dockerfile http-statistics.py ebpf-programs/http-requests.c ebpf-programs/http-responses.c
 	docker build -t $(IMAGE) .
 	touch $@
 

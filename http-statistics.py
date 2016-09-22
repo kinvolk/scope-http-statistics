@@ -8,29 +8,37 @@ import os
 import signal
 import errno
 import json
-import urlparse
+try:
+    from urllib.parse import urlparse
+except ImportError:
+    from urlparse import urlparse
 import threading
 import socket
 import BaseHTTPServer
 import SocketServer
 import sys
 
-EBPF_FILE = "http-requests.c"
-EBPF_TABLE_NAME = "received_http_requests"
-PLUGIN_ID="http-requests"
+EBPF_PROGRAM_REQUESTS = "http-requests.c"
+EBPF_PROGRAM_RESPONSES = "http-responses.c"
+EBPF_TABLE_REQUESTS_RATE_NAME = "received_http_requests"
+EBPF_TABLE_RESPONSES_CODE_NAME = "sent_http_responses"
+PLUGIN_ID="http-statistics"
 PLUGIN_UNIX_SOCK = "/var/run/scope/plugins/" + PLUGIN_ID + ".sock"
 
 class KernelInspector(threading.Thread):
     def __init__(self):
         super(KernelInspector, self).__init__()
-        self.bpf = bcc.BPF(EBPF_FILE)
+        # self.bpf = bcc.BPF(EBPF_PROGRAM_REQUESTS, debug=6)
+        self.bpf = bcc.BPF(EBPF_PROGRAM_RESPONSES, debug=6)
         self.http_rate_per_pid = dict()
+        self.http_resp_code_rate_per_pid = dict()
         self.lock = threading.Lock()
 
     def update_http_rate_per_pid(self, last_req_count_snapshot):
         # Aggregate the kernel's per-task http request counts into userland's
         # per-process counts
-        req_count_table = self.bpf.get_table(EBPF_TABLE_NAME)
+        # req_count_table = self.bpf.get_table(EBPF_TABLE_REQUESTS_RATE_NAME)
+        req_count_table = self.bpf.get_table(EBPF_TABLE_RESPONSES_CODE_NAME)
         new_req_count_snapshot = collections.defaultdict(int)
         for pid_tgid, req_count in req_count_table.iteritems():
             # Note that the kernel's tgid maps into userland's pid
@@ -38,6 +46,9 @@ class KernelInspector(threading.Thread):
             #  the unique identifier of a kernel task)
             pid = pid_tgid.value >> 32
             new_req_count_snapshot[pid] += req_count.value
+
+        print ("new_req_count_snapshot")
+        print (json.dumps(new_req_count_snapshot, sort_keys=True, indent=4))
 
         # Compute request rate
         new_http_rate_per_pid = dict()
@@ -47,15 +58,66 @@ class KernelInspector(threading.Thread):
                  request_delta -= last_req_count_snapshot[pid]
             new_http_rate_per_pid[pid] = request_delta
 
+        print ("new_http_rate_per_pid")
+        print (json.dumps(new_http_rate_per_pid, sort_keys=True, indent=4))
+
         self.lock.acquire()
         self.http_rate_per_pid = new_http_rate_per_pid
         self.lock.release()
 
         return new_req_count_snapshot
 
+    def update_http_resp_per_pid(self, last_resp_count_snapshot):
+        # Aggregate the kernel's per-task http response code counts into userland's
+        # per-process counts
+        resp_count_table = self.bpf.get_table(EBPF_TABLE_RESPONSES_CODE_NAME)
+        new_resp_count_snapshot = collections.defaultdict(dict)
+
+        for pid_tgid, codes_counts in resp_count_table.iteritems():
+            # Note that the kernel's tgid maps into userland's pid
+            # (not to be confused by the kernel's pid, which is
+            #  the unique identifier of a kernel task)
+            pid = pid_tgid.value >> 32
+            new_resp_count_snapshot[pid] = collections.defaultdict(int)
+
+            for code in range(len(codes_counts.codes)):
+                code_count = codes_counts.codes[code]
+                if code not in new_resp_count_snapshot[pid]:
+                    new_resp_count_snapshot[pid][code] = 0
+                new_resp_count_snapshot[pid][code] += code_count
+
+        print ("new_resp_count_snapshot")
+        print (json.dumps(new_resp_count_snapshot, sort_keys=True, indent=4))
+
+        # Compute response codes rate
+        new_http_resp_code_rate_per_pid = dict()
+        for pid, resp_codes in new_resp_count_snapshot.iteritems():
+            if pid not in new_http_resp_code_rate_per_pid:
+                new_http_resp_code_rate_per_pid[pid] = collections.defaultdict(dict)
+            for code in resp_codes:
+                resp_code_delta = resp_codes[code]
+                if pid in last_resp_count_snapshot:
+                    resp_code_delta -= last_resp_count_snapshot[pid][code]
+                new_http_resp_code_rate_per_pid[pid][code] = resp_code_delta
+
+        print ("new_http_resp_code_rate_per_pid")
+        print (json.dumps(new_http_resp_code_rate_per_pid, sort_keys=True, indent=4))
+
+        self.lock.acquire()
+        self.http_resp_code_rate_per_pid = new_http_resp_code_rate_per_pid
+        self.lock.release()
+
+        return new_resp_count_snapshot
+
     def on_http_rate_per_pid(self, f):
         self.lock.acquire()
         r = f(self.http_rate_per_pid)
+        self.lock.release()
+        return r
+
+    def on_http_resp_per_pid(self, f):
+        self.lock.acquire()
+        r = f(self.http_resp_code_rate_per_pid)
         self.lock.release()
         return r
 
@@ -66,9 +128,11 @@ class KernelInspector(threading.Thread):
         # call) and less robust (it contends with the increments done by the
         # kernel probe).
         req_count_snapshot = collections.defaultdict(int)
+        resp_count_snapshot = collections.defaultdict(dict)
         while True:
             time.sleep(1)
-            req_count_snapshot = self.update_http_rate_per_pid(req_count_snapshot)
+            # req_count_snapshot = self.update_http_rate_per_pid(req_count_snapshot)
+            resp_count_snapshot = self.update_http_resp_per_pid(resp_count_snapshot)
 
 
 class PluginRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -80,7 +144,7 @@ class PluginRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.log_extra  = ''
-        path = urlparse.urlparse(self.path)[2].lower()
+        path = urlparse(self.path)[2].lower()
         if path == '/report':
             self.do_report()
         else:
@@ -110,6 +174,7 @@ class PluginRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_report(self):
         kernel_inspector = self.server.kernel_inspector
+        # process_nodes = kernel_inspector.on_http_rate_per_pid(self.get_process_nodes)
         process_nodes = kernel_inspector.on_http_rate_per_pid(self.get_process_nodes)
         report = {
             'Process': {
@@ -133,6 +198,7 @@ class PluginRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             ]
         }
         body = json.dumps(report)
+        # print (json.dumps(report, sort_keys=True, indent=4))
         self.request_log = "resp_size=%d, resp_entry_count=%d" % (len(body), len(process_nodes))
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
