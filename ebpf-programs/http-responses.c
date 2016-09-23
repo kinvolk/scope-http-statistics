@@ -19,7 +19,7 @@ BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
    (trace_skb_copy_datagram_iovec), which would be more stable than a kprobe but
    it lacks the offset argument.
  */
-int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, void *unused_iovec, int len)
+int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, void *unused_iovec, int len)
 {
 
   /* Inspect the beginning of socket buffers copied to user-space to determine
