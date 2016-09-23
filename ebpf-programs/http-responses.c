@@ -1,10 +1,8 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 
-struct http_resposne_codes_t {
-//    u64 codes[8];
-    u64 _200;
-    u64 _404;
+struct http_response_codes_t {
+    u64 codes[8];
 };
 
 /* Hash map from (Task group id|Task id) to (Number of sent http responses' codes).
@@ -12,7 +10,7 @@ struct http_resposne_codes_t {
    so that entries can be cleared up independently when a task exists.
    This implies that userspace needs to do the per-process aggregation.
  */
-BPF_HASH(received_http_responses, u64, struct http_resposne_codes_t);
+BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
 
 /* skb_copy_datagram_iter() (Kernels >= 3.19) is in charge of copying socket
    buffers from kernel to userspace.
@@ -113,37 +111,39 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
   u8 tens = (u8)data[10];
   u8 units = (u8)data[11];
 
-  if (hundreds < 48 || hundreds > 57) {
+  if (hundreds < '0' || hundreds > '9') {
         return 0;
   } else {
-       hundreds -= 48;
+       hundreds -= '0';
   }
-  if (tens < 48 || tens > 57) {
+  if (tens < '0' || tens > '9') {
         return 0;
   } else {
-       tens -= 48;
+       tens -= '0';
   }
-   if (units < 48 || units > 57) {
+   if (units < '0' || units > '9') {
         return 0;
   } else {
-       units -= 48;
+       units -= '0';
   }
 
   u64 pid_tgid = bpf_get_current_pid_tgid();
   u16 http_code = hundreds * 100 + tens * 10 + units;
 
-  struct http_resposne_codes_t* current_codes_counts = received_http_responses.lookup(&pid_tgid);
+  struct http_response_codes_t new_codes_counts;
+  memset(new_codes_counts.codes, 0, 8 * sizeof(u64));
+
+  struct http_response_codes_t* current_codes_counts = sent_http_responses.lookup_or_init(&pid_tgid, &new_codes_counts);
+  new_codes_counts = *current_codes_counts;
 
   switch (http_code) {
     case 200:
-//        current_codes_counts->codes[0]++;
-        current_codes_counts->_200++;
-        received_http_responses.update(&pid_tgid, current_codes_counts);
+        new_codes_counts.codes[2]++;
+        sent_http_responses.update(&pid_tgid, &new_codes_counts);
         break;
     case 404:
-//        current_codes_counts->codes[1]++;
-        current_codes_counts->_404++;
-        received_http_responses.update(&pid_tgid, current_codes_counts);
+        new_codes_counts.codes[4]++;
+        sent_http_responses.update(&pid_tgid, &new_codes_counts);
         break;
     default:
         return 0;
@@ -156,6 +156,6 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
 /* Clear out request count entries of tasks on exit */
 int kprobe__do_exit(struct pt_regs *ctx) {
   u64 pid_tgid = bpf_get_current_pid_tgid();
-  received_http_responses.delete(&pid_tgid);
+  sent_http_responses.delete(&pid_tgid);
   return 0;
 }

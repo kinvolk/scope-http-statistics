@@ -21,7 +21,7 @@ import sys
 EBPF_PROGRAM_REQUESTS = "http-requests.c"
 EBPF_PROGRAM_RESPONSES = "http-responses.c"
 EBPF_TABLE_REQUESTS_RATE_NAME = "received_http_requests"
-EBPF_TABLE_RESPONSES_CODE_NAME = "received_http_responses"
+EBPF_TABLE_RESPONSES_CODE_NAME = "sent_http_responses"
 PLUGIN_ID="http-statistics"
 PLUGIN_UNIX_SOCK = "/var/run/scope/plugins/" + PLUGIN_ID + ".sock"
 
