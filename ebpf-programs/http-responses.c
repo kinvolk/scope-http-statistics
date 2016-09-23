@@ -1,12 +1,18 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 
+struct http_resposne_codes_t {
+//    u64 codes[8];
+    u64 _200;
+    u64 _404;
+};
+
 /* Hash map from (Task group id|Task id) to (Number of sent http responses' codes).
    We need to gather requests per task and not only per task group (i.e. userspace pid)
    so that entries can be cleared up independently when a task exists.
    This implies that userspace needs to do the per-process aggregation.
  */
-BPF_HASH(received_http_responses, u64, u64);
+BPF_HASH(received_http_responses, u64, struct http_resposne_codes_t);
 
 /* skb_copy_datagram_iter() (Kernels >= 3.19) is in charge of copying socket
    buffers from kernel to userspace.
@@ -126,11 +132,22 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
   u64 pid_tgid = bpf_get_current_pid_tgid();
   u16 http_code = hundreds * 100 + tens * 10 + units;
 
-  if (http_code != 404) {
-    return 0;
-  }
+  struct http_resposne_codes_t* current_codes_counts = received_http_responses.lookup(&pid_tgid);
 
-  received_http_responses.increment(pid_tgid);
+  switch (http_code) {
+    case 200:
+//        current_codes_counts->codes[0]++;
+        current_codes_counts->_200++;
+        received_http_responses.update(&pid_tgid, current_codes_counts);
+        break;
+    case 404:
+//        current_codes_counts->codes[1]++;
+        current_codes_counts->_404++;
+        received_http_responses.update(&pid_tgid, current_codes_counts);
+        break;
+    default:
+        return 0;
+  }
 
   return 0;
 }
