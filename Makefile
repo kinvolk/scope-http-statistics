@@ -1,6 +1,6 @@
 .PHONY: run clean
 
-IMAGE=weavescope-http-requests-plugin
+IMAGE=weavescope-http-statistics-plugin
 UPTODATE=.uptodate
 
 run: $(UPTODATE)
@@ -13,7 +13,7 @@ run: $(UPTODATE)
 	  --name $(IMAGE) \
 	  $(IMAGE)
 
-$(UPTODATE): Dockerfile http-requests.py ebpf-programs/http-requests.c
+$(UPTODATE): Dockerfile http-statistics.py ebpf-programs/http-requests.c ebpf-programs/http-responses.c
 	docker build -t $(IMAGE) .
 	touch $@
 
