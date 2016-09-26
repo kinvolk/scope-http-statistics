@@ -11,6 +11,15 @@ struct http_response_codes_t {
    This implies that userspace needs to do the per-process aggregation.
  */
 BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
+BPF_HASH(currdata, u64, const struct sk_buff*);
+
+int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, struct iov_iter *iovec, int len)
+{
+  u64 pid = bpf_get_current_pid_tgid();
+  // stash the sock buffer ptr for lookup on return
+  currdata.update(&pid, &skb);
+  return 0;
+}
 
 /* skb_copy_datagram_iter() (Kernels >= 3.19) is in charge of copying socket
    buffers from kernel to userspace.
@@ -19,9 +28,10 @@ BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
    (trace_skb_copy_datagram_iovec), which would be more stable than a kprobe but
    it lacks the offset argument.
  */
-int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, void *unused_iovec, int len)
+//int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, void *unused_iovec, int len)
+//int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, struct iov_iter *from, int len)
+int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 {
-
   /* Inspect the beginning of socket buffers copied to user-space to determine
      if they correspond to http responses.
 
@@ -37,9 +47,26 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
        really tricky from ebpf.
   */
 
+  u64 pid = bpf_get_current_pid_tgid();
+  const struct sk_buff **skbpp;
+  skbpp = currdata.lookup(&pid);
+
+  if (skbpp == 0) {
+    return 0;   // missed entry
+  }
+
+  const struct sk_buff *skb = *skbpp;
+
+  /* copy into the stack the parts of skb we want */
+  struct sock sk;
+  unsigned int skb_data_len;
+  unsigned int skb_len;
+  unsigned char *skb_data;
+
+//  skb = (struct sk_buff*)from;
   /* Verify it's a TCP socket
      TODO: is it worth caching it in a socket table?
-   */
+  */
   struct sock *sk = skb->sk;
   unsigned short skc_family = sk->__sk_common.skc_family;
   switch (skc_family) {
@@ -48,8 +75,10 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
     case PF_UNIX:
       break;
     default:
+      goto cleanup;
       return 0;
   }
+  bpf_trace_printk("skc_family parsed\n");
   /* The socket type and protocol are not directly addressable since they are
      bitfields.  We access them by assuming sk_write_queue is immediately before
      them (admittedly pretty hacky).
@@ -59,11 +88,13 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
   bpf_probe_read(&flags, sizeof(flags), ((u8*)sk) + flags_offset);
   u16 sk_type = flags >> 16;
   if (sk_type != SOCK_STREAM) {
+    goto cleanup;
     return 0;
   }
   u8 sk_protocol = flags >> 8 & 0xFF;
   /* The protocol is unset (IPPROTO_IP) in Unix sockets */
   if ( (sk_protocol != IPPROTO_TCP) && ((skc_family == PF_UNIX) && (sk_protocol != IPPROTO_IP)) ) {
+    goto cleanup;
     return 0;
   }
 
@@ -73,8 +104,10 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
      HTTP/1.1 XXX message
      What about HTTP/2?
   */
+  unsigned int offset = 0;
   unsigned int available_data = head_len - offset;
   if (available_data < 12) {
+    goto cleanup;
     return 0;
   }
 
@@ -94,18 +127,23 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
   /*
     TODO alepuccetti: support other HTTP versions
   */
+//  bpf_trace_printk("data: %s\n", &data);
   switch (data[0]) {
     /* "HTTP/1.1 " */
     case 'H':
       if ((data[1] != 'T') || (data[2] != 'T') || (data[3] != 'P') ||
           (data[4] != '/') || (data[5] != '1') || (data[6] != '.') || (data[7] != '1') ||
           (data[8] != ' ')) {
+        bpf_trace_printk("HTTP/1.1 not found\n");
         return 0;
       }
       break;
     default:
+      bpf_trace_printk("HTTP/1.1 not found\n");
       return 0;
   }
+  bpf_trace_printk("available_data: %u\n", available_data);
+  bpf_trace_printk("data: %s\n", &data);
 
   u8 hundreds = (u8)data[9];
   u8 tens = (u8)data[10];
@@ -150,6 +188,10 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
   }
 
   return 0;
+
+cleanup:
+    currdata.delete(&pid);
+    return 0;
 }
 
 
