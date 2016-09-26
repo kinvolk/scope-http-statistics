@@ -1,5 +1,6 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/inet_sock.h>
 
 struct http_response_codes_t {
     u64 codes[8];
@@ -57,18 +58,29 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 
   const struct sk_buff *skb = *skbpp;
 
-  /* copy into the stack the parts of skb we want */
-  struct sock sk;
+  /*
+    copy into the stack the parts of skb we want
+  */
+  struct sock *skp;
+  bpf_probe_read(&skp, sizeof(struct sock *), &(skb->sk));
+
+  unsigned short skc_family;
   unsigned int skb_data_len;
   unsigned int skb_len;
-  unsigned char *skb_data;
+  unsigned char skb_data[12];
 
-//  skb = (struct sk_buff*)from;
+  bpf_probe_read(&skc_family, sizeof(skc_family), &skp->sk_family);
+  bpf_probe_read(&skb_len, sizeof(skb_len), &(skb->len));
+  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &(skb->data_len));
+ if (skb_data_len < 12) {
+       goto cleanup;
+       return 0;
+  }
+  bpf_probe_read(skb_data, 12, skb->data);
+
   /* Verify it's a TCP socket
      TODO: is it worth caching it in a socket table?
   */
-  struct sock *sk = skb->sk;
-  unsigned short skc_family = sk->__sk_common.skc_family;
   switch (skc_family) {
     case PF_INET:
     case PF_INET6:
@@ -84,8 +96,8 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
      them (admittedly pretty hacky).
   */
   unsigned int flags = 0;
-  size_t flags_offset = offsetof(typeof(struct sock), sk_write_queue) + sizeof(sk->sk_write_queue);
-  bpf_probe_read(&flags, sizeof(flags), ((u8*)sk) + flags_offset);
+  size_t flags_offset = offsetof(typeof(struct sock), sk_write_queue) + sizeof(skp->sk_write_queue);
+  bpf_probe_read(&flags, sizeof(flags), ((u8*)skp) + flags_offset);
   u16 sk_type = flags >> 16;
   if (sk_type != SOCK_STREAM) {
     goto cleanup;
@@ -99,7 +111,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   }
 
   /* Inline implementation of skb_headlen() */
-  unsigned int head_len = skb->len - skb->data_len;
+  unsigned int head_len = skb_len - skb_data_len;
   /* The minimum length of http response is always greater than 12 bytes
      HTTP/1.1 XXX message
      What about HTTP/2?
@@ -121,8 +133,8 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   /*
     TODO alepuccetti: The code description?
   */
-  u8 data[12] = {};
-  bpf_probe_read(&data, 12, skb->data + offset);
+  u8 data[12] = {0,};
+  bpf_probe_read(&data, 12, skb_data + offset);
 
   /*
     TODO alepuccetti: support other HTTP versions
