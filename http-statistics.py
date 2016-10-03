@@ -29,7 +29,7 @@ class KernelInspector(threading.Thread):
     def __init__(self):
         super(KernelInspector, self).__init__()
         # self.bpf = bcc.BPF(EBPF_PROGRAM_REQUESTS)
-        self.bpf = bcc.BPF(EBPF_PROGRAM_RESPONSES, debug=2)
+        self.bpf = bcc.BPF(EBPF_PROGRAM_RESPONSES, debug=6)
         self.http_rate_per_pid = dict()
         self.http_resp_code_rate_per_pid = dict()
         self.lock = threading.Lock()

@@ -11,14 +11,14 @@ struct http_response_codes_t {
    so that entries can be cleared up independently when a task exists.
    This implies that userspace needs to do the per-process aggregation.
  */
-BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
-BPF_HASH(currdata, u64, const struct sk_buff*);
+BPF_HASH(sent_http_responses, u32, struct http_response_codes_t);
+BPF_HASH(currdata, u32, const struct sk_buff*);
 
 int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, struct iov_iter *iovec, int len)
 {
-  u64 pid = bpf_get_current_pid_tgid();
+  u32 pid_tgid = bpf_get_current_pid_tgid();
   // stash the sock buffer ptr for lookup on return
-  currdata.update(&pid, &skb);
+  currdata.update(&pid_tgid, &skb);
   return 0;
 }
 
@@ -48,35 +48,60 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
        really tricky from ebpf.
   */
 
-  u64 pid = bpf_get_current_pid_tgid();
+  int ret = PT_REGS_RC(ctx);
+  u32 pid_tgid = bpf_get_current_pid_tgid();
   const struct sk_buff **skbpp;
-  skbpp = currdata.lookup(&pid);
+  skbpp = currdata.lookup(&pid_tgid);
 
   if (skbpp == 0) {
     return 0;   // missed entry
   }
 
-  const struct sk_buff *skb = *skbpp;
+  if (ret != 0) {
+    goto cleanup;
+    return 0;
+  }
+
+//  struct sk_buff *skbp = 0;
+  struct sk_buff *skbp = *skbpp;
+//  bpf_probe_read(&skbp, sizeof(const struct sk_buff *), skbpp);
+  if (skbp == 0) {
+    goto cleanup;
+    return 0;
+   }
 
   /*
-    copy into the stack the parts of skb we want
+    copy into the stack the parts of skb that we want
   */
   struct sock *skp;
-  bpf_probe_read(&skp, sizeof(struct sock *), &(skb->sk));
+  bpf_probe_read(&skp, sizeof(struct sock *), &skbp->sk);
 
   unsigned short skc_family;
-  unsigned int skb_data_len;
   unsigned int skb_len;
+  unsigned int skb_data_len;
   unsigned char skb_data[12];
 
   bpf_probe_read(&skc_family, sizeof(skc_family), &skp->sk_family);
-  bpf_probe_read(&skb_len, sizeof(skb_len), &(skb->len));
-  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &(skb->data_len));
- if (skb_data_len < 12) {
-       goto cleanup;
-       return 0;
+//  bpf_probe_read(&skc_family, sizeof(skc_family), &skbp->sk->sk_family);
+
+  bpf_probe_read(&skb_len, sizeof(skb_len), &skbp->len);
+  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &skbp->data_len);
+
+//  bpf_probe_read(&skc_family, sizeof(skc_family), &(*skbpp)->sk->sk_family);
+//  bpf_probe_read(&skb_len, sizeof(skb_len), &(*skbpp)->len);
+//  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &(*skbpp)->data_len);
+
+  if (skb_data_len != 0) {
+      bpf_trace_printk("skb_len: %u, skb_data_len: %u\n", skb_len, skb_data_len);
   }
-  bpf_probe_read(skb_data, 12, skb->data);
+
+  if (skb_data_len < 12) {
+    goto cleanup;
+    return 0;
+  }
+//  bpf_probe_read(&skb_data, 12, &skbp->data);
+//  bpf_probe_read(&skb_data, 12, &(*skbpp)->data);
+//  bpf_trace_printk("data: %s\n", &skb_data);
 
   /* Verify it's a TCP socket
      TODO: is it worth caching it in a socket table?
@@ -103,6 +128,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
     goto cleanup;
     return 0;
   }
+  bpf_trace_printk("sk_type == SOCK_STREAM\n");
   u8 sk_protocol = flags >> 8 & 0xFF;
   /* The protocol is unset (IPPROTO_IP) in Unix sockets */
   if ( (sk_protocol != IPPROTO_TCP) && ((skc_family == PF_UNIX) && (sk_protocol != IPPROTO_IP)) ) {
@@ -118,10 +144,12 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   */
   unsigned int offset = 0;
   unsigned int available_data = head_len - offset;
+  bpf_trace_printk("head_len: %u, offset: %u, available_data: %u\n", head_len, offset, available_data);
   if (available_data < 12) {
     goto cleanup;
     return 0;
   }
+  bpf_trace_printk("available_data > 12\n");
 
   /* Check if buffer begins with the string "HTTP/1.1 ".
 
@@ -134,12 +162,12 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
     TODO alepuccetti: The code description?
   */
   u8 data[12] = {0,};
-  bpf_probe_read(&data, 12, skb_data + offset);
+  bpf_probe_read(&data, 12, (&skbp->data) + offset);
 
   /*
     TODO alepuccetti: support other HTTP versions
   */
-//  bpf_trace_printk("data: %s\n", &data);
+  bpf_trace_printk("data: %s\n", &data);
   switch (data[0]) {
     /* "HTTP/1.1 " */
     case 'H':
@@ -177,7 +205,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
        units -= '0';
   }
 
-  u64 pid_tgid = bpf_get_current_pid_tgid();
+//  u64 pid_tgid = bpf_get_current_pid_tgid();
   u16 http_code = hundreds * 100 + tens * 10 + units;
 
   struct http_response_codes_t new_codes_counts;
@@ -202,14 +230,14 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   return 0;
 
 cleanup:
-    currdata.delete(&pid);
+    currdata.delete(&pid_tgid);
     return 0;
 }
 
 
 /* Clear out request count entries of tasks on exit */
 int kprobe__do_exit(struct pt_regs *ctx) {
-  u64 pid_tgid = bpf_get_current_pid_tgid();
+  u32 pid_tgid = bpf_get_current_pid_tgid();
   sent_http_responses.delete(&pid_tgid);
   return 0;
 }
