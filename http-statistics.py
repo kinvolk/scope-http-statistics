@@ -28,7 +28,7 @@ PLUGIN_UNIX_SOCK = "/var/run/scope/plugins/" + PLUGIN_ID + ".sock"
 class KernelInspector(threading.Thread):
     def __init__(self):
         super(KernelInspector, self).__init__()
-        # self.bpf = bcc.BPF(EBPF_PROGRAM_REQUESTS)
+        # self.bpf = bcc.BPF(EBPF_PROGRAM_REQUESTS, debug=6)
         self.bpf = bcc.BPF(EBPF_PROGRAM_RESPONSES, debug=6)
         self.http_rate_per_pid = dict()
         self.http_resp_code_rate_per_pid = dict()
@@ -47,6 +47,9 @@ class KernelInspector(threading.Thread):
             pid = pid_tgid.value >> 32
             new_req_count_snapshot[pid] += req_count.value
 
+        print ("new_req_count_snapshot")
+        print (json.dumps(new_req_count_snapshot, sort_keys=True, indent=4))
+
         # Compute request rate
         new_http_rate_per_pid = dict()
         for pid, req_count in new_req_count_snapshot.iteritems():
@@ -54,6 +57,9 @@ class KernelInspector(threading.Thread):
             if pid in last_req_count_snapshot:
                  request_delta -= last_req_count_snapshot[pid]
             new_http_rate_per_pid[pid] = request_delta
+
+        print ("new_http_rate_per_pid")
+        print (json.dumps(new_http_rate_per_pid, sort_keys=True, indent=4))
 
         self.lock.acquire()
         self.http_rate_per_pid = new_http_rate_per_pid
