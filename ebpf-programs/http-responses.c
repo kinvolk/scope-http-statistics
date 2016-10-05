@@ -6,19 +6,47 @@ struct http_response_codes_t {
     u64 codes[8];
 };
 
+struct sk_buff_off_t {
+ const struct sk_buff *skb;
+ int offset;
+};
+
 /* Hash map from (Task group id|Task id) to (Number of sent http responses' codes).
    We need to gather requests per task and not only per task group (i.e. userspace pid)
    so that entries can be cleared up independently when a task exists.
    This implies that userspace needs to do the per-process aggregation.
  */
-BPF_HASH(sent_http_responses, u32, struct http_response_codes_t);
-BPF_HASH(currdata, u32, const struct sk_buff*);
+BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
+BPF_HASH(currdata, u64, const struct sk_buff*);
+BPF_HASH(currskb, u64, const struct sk_buff*);
+BPF_HASH(curroff, u64, int);
 
 int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buff *skb, int offset, struct iov_iter *iovec, int len)
 {
-  u32 pid_tgid = bpf_get_current_pid_tgid();
+  u64 pid_tgid = bpf_get_current_pid_tgid();
   // stash the sock buffer ptr for lookup on return
   currdata.update(&pid_tgid, &skb);
+//  struct sk_buff_off_t skboff;
+//  struct sk_buff_off_t* skboffp;
+//  skboffp = &skboff;
+//  memset(&skboffp->skb, 0, sizeof(const struct sk_buff*));
+//  memset(&skboffp->offset, 0, sizeof(int));
+//  skboff.skb = skb;
+//  bpf_probe_read(&skboffp->skb, sizeof(const struct sk_buff *), &skb);
+//  skboff.offset = offset;
+//  bpf_probe_read(&skboffp->offset, sizeof(int), &offset);
+//  currskoff.update(&pid_tgid, &skboff);
+//  currskoff.update(&pid_tgid, &skboffp);
+
+//  bpf_trace_printk("--------- offset: %u\n", offset);
+  const struct sk_buff *skbp;
+  bpf_probe_read(&skbp, sizeof(const struct sk_buff *), &skb);
+//  bpf_trace_printk("kprobe [%u] ----- skbp: %p, skb: %p\n", pid_tgid, skbp, skb);
+  bpf_trace_printk("kprobe [%u] ----- skb->data: %p\n", pid_tgid, skb->data);
+
+  currskb.update(&pid_tgid, &skb);
+  curroff.update(&pid_tgid, &offset);
+
   return 0;
 }
 
@@ -49,9 +77,13 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   */
 
   int ret = PT_REGS_RC(ctx);
-  u32 pid_tgid = bpf_get_current_pid_tgid();
+  u64 pid_tgid = bpf_get_current_pid_tgid();
   const struct sk_buff **skbpp;
   skbpp = currdata.lookup(&pid_tgid);
+  int offset = -1;
+  int *offsetp = 0;
+  offsetp = curroff.lookup(&pid_tgid);
+  bpf_probe_read(&offset, sizeof(int), offsetp);
 
   if (skbpp == 0) {
     return 0;   // missed entry
@@ -62,9 +94,10 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
     return 0;
   }
 
-//  struct sk_buff *skbp = 0;
-  struct sk_buff *skbp = *skbpp;
-//  bpf_probe_read(&skbp, sizeof(const struct sk_buff *), skbpp);
+  const struct sk_buff *skbp = 0;
+  bpf_probe_read(&skbp, sizeof(const struct sk_buff *), skbpp);
+//  bpf_trace_printk("kretprobe [%u] ----- skbp: %p, skbpp: %p\n", pid_tgid, skbp, skbpp);
+
   if (skbp == 0) {
     goto cleanup;
     return 0;
@@ -79,19 +112,15 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   unsigned short skc_family;
   unsigned int skb_len;
   unsigned int skb_data_len;
-  unsigned char skb_data[12];
+  unsigned char data[12];
 
-  bpf_probe_read(&skc_family, sizeof(skc_family), &skp->sk_family);
-//  bpf_probe_read(&skc_family, sizeof(skc_family), &skbp->sk->sk_family);
+  bpf_probe_read(&skc_family, sizeof(unsigned short), &skp->sk_family);
 
-  bpf_probe_read(&skb_len, sizeof(skb_len), &skbp->len);
-  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &skbp->data_len);
+  bpf_probe_read(&skb_len, sizeof(unsigned int), &skbp->len);
+  bpf_probe_read(&skb_data_len, sizeof(unsigned int), &skbp->data_len);
 
-//  bpf_probe_read(&skc_family, sizeof(skc_family), &(*skbpp)->sk->sk_family);
-//  bpf_probe_read(&skb_len, sizeof(skb_len), &(*skbpp)->len);
-//  bpf_probe_read(&skb_data_len, sizeof(skb_data_len), &(*skbpp)->data_len);
-
-  if (skb_data_len != 0) {
+//  if (skb_data_len != 0) {
+  if (1) {
       bpf_trace_printk("skb_len: %u, skb_data_len: %u\n", skb_len, skb_data_len);
   }
 
@@ -99,10 +128,6 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
     goto cleanup;
     return 0;
   }
-//  bpf_probe_read(&skb_data, 12, &skbp->data);
-//  bpf_probe_read(&skb_data, 12, &(*skbpp)->data);
-//  bpf_trace_printk("data: %s\n", &skb_data);
-
   /* Verify it's a TCP socket
      TODO: is it worth caching it in a socket table?
   */
@@ -115,7 +140,12 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
       goto cleanup;
       return 0;
   }
-  bpf_trace_printk("skc_family parsed\n");
+  bpf_trace_printk("skc_family == PF_INET | PF_INET6 | PF_UNIX\n");
+//  return 0;
+
+//  bpf_probe_read(&data, 12, skbp->data + offset);
+//  bpf_trace_printk("data: %s\n", data);
+//  return 0;
   /* The socket type and protocol are not directly addressable since they are
      bitfields.  We access them by assuming sk_write_queue is immediately before
      them (admittedly pretty hacky).
@@ -142,7 +172,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
      HTTP/1.1 XXX message
      What about HTTP/2?
   */
-  unsigned int offset = 0;
+
   unsigned int available_data = head_len - offset;
   bpf_trace_printk("head_len: %u, offset: %u, available_data: %u\n", head_len, offset, available_data);
   if (available_data < 12) {
@@ -150,6 +180,13 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
     return 0;
   }
   bpf_trace_printk("available_data > 12\n");
+
+//  bpf_probe_read(&data, 12, skbp->data + offset);
+  bpf_probe_read(&data, 12, &skbp->data);
+  bpf_trace_printk("data: %s\n", data);
+  bpf_trace_printk("kprobe [%u] ----- skbp->data: %p, &skbp->data: %p\n", pid_tgid, skbp->data, &skbp->data);
+
+  return 0;
 
   /* Check if buffer begins with the string "HTTP/1.1 ".
 
@@ -161,13 +198,27 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   /*
     TODO alepuccetti: The code description?
   */
-  u8 data[12] = {0,};
-  bpf_probe_read(&data, 12, (&skbp->data) + offset);
+//  u8 data[12] = {0,};
+//  u8 data[32] = {0,};
+//  bpf_probe_read(&data, 32, skbp->data + offset);
 
   /*
     TODO alepuccetti: support other HTTP versions
   */
-  bpf_trace_printk("data: %s\n", &data);
+//  bpf_trace_printk("data: %s\n", data);
+    int i = 0;
+//  for (i = 0; i < 100; i++) {
+//    bpf_trace_printk("data[%d]: %c\n", i, data[i]);
+//  }
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+    bpf_trace_printk("data[%d]: %x\n", i, data[i]);i++;
+
   switch (data[0]) {
     /* "HTTP/1.1 " */
     case 'H':
@@ -205,7 +256,6 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
        units -= '0';
   }
 
-//  u64 pid_tgid = bpf_get_current_pid_tgid();
   u16 http_code = hundreds * 100 + tens * 10 + units;
 
   struct http_response_codes_t new_codes_counts;
@@ -213,6 +263,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 
   struct http_response_codes_t* current_codes_counts = sent_http_responses.lookup_or_init(&pid_tgid, &new_codes_counts);
   new_codes_counts = *current_codes_counts;
+  // TODO alepuccetti: should current_codes_counts be freed?
 
   switch (http_code) {
     case 200:
@@ -231,13 +282,15 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 
 cleanup:
     currdata.delete(&pid_tgid);
+    currskb.delete(&pid_tgid);
+    curroff.delete(&pid_tgid);
     return 0;
 }
 
 
 /* Clear out request count entries of tasks on exit */
 int kprobe__do_exit(struct pt_regs *ctx) {
-  u32 pid_tgid = bpf_get_current_pid_tgid();
+  u64 pid_tgid = bpf_get_current_pid_tgid();
   sent_http_responses.delete(&pid_tgid);
   return 0;
 }

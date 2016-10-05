@@ -73,7 +73,7 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
   if (available_data < 7) {
     return 0;
   }
-
+  bpf_trace_printk("skb_len: %u, skb_data_len: %u\n", skb->len, skb->data_len);
   /* Check if buffer begins with a method name followed by a space.
 
      To avoid false positives it would be good to do a deeper inspection
@@ -91,6 +91,7 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
   } else {
     bpf_probe_read(&data, 7, skb->data + offset);
   }
+  bpf_trace_printk("data: %s\n", data);
 
   switch (data[0]) {
     /* DELETE */
