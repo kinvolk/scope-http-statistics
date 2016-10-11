@@ -4,7 +4,7 @@ IMAGE=weavescope-http-statistics-plugin
 UPTODATE=.uptodate
 
 run: $(UPTODATE)
-	docker run --rm -it \
+	sudo docker run --rm -it \
 	  --privileged --net=host \
 	  -v /lib/modules:/lib/modules \
 	  -v /usr/src:/usr/src \
@@ -14,9 +14,9 @@ run: $(UPTODATE)
 	  $(IMAGE)
 
 $(UPTODATE): Dockerfile http-statistics.py ebpf-programs/http-requests.c ebpf-programs/http-responses.c
-	docker build -t $(IMAGE) .
+	sudo docker build -t $(IMAGE) .
 	touch $@
 
 clean:
 	- rm -rf $(UPTODATE)
-	- docker rmi $(IMAGE)
+	- sudo docker rmi $(IMAGE)

@@ -17,7 +17,7 @@ struct sk_buff_off_t {
    This implies that userspace needs to do the per-process aggregation.
  */
 BPF_HASH(sent_http_responses, u64, struct http_response_codes_t);
-BPF_HASH(currdata, u64, const struct sk_buff*);
+BPF_HASH(currdata, u64, unsigned char*);
 BPF_HASH(currskb, u64, const struct sk_buff*);
 BPF_HASH(curroff, u64, int);
 
@@ -73,10 +73,10 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
   /* http://stackoverflow.com/questions/25047905/http-request-minimum-size-in-bytes
      minimum length of http request is always greater than 7 bytes
   */
-  unsigned int available_data = head_len - offset;
-  if (available_data < 12) {
-    return 0;
-  }
+  //unsigned int available_data = head_len - offset;
+  //if (available_data < 12) {
+  //  return 0;
+ // }
 //  bpf_trace_printk("skb_len: %u, skb_data_len: %u\n", skb->len, skb->data_len);
   /* Check if buffer begins with a method name followed by a space.
 
@@ -100,7 +100,8 @@ int kprobe__skb_copy_datagram_iter(struct pt_regs *ctx, const struct sk_buff *sk
       }
       bpf_trace_printk("_iter: kprobe ----- skb: %p, offset: %d\n", skb, offset);
       bpf_trace_printk("_iter: kprobe: HTTP/1.1 FOUND!!!\n");
-      bpf_trace_printk("data: %s\n", &data);
+      bpf_trace_printk("kprobe data: %d %d\n", data[0], data[1]);
+      bpf_trace_printk("kprobe data: %d %d\n", data[2], data[3]);
       break;
     default:
 //      bpf_trace_printk("HTTP/1.1 not found\n");
@@ -160,7 +161,6 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
 {
   u64 pid_tgid = bpf_get_current_pid_tgid();
   // stash the sock buffer ptr for lookup on return
-  currdata.update(&pid_tgid, &skb);
 //  struct sk_buff_off_t skboff;
 //  struct sk_buff_off_t* skboffp;
 //  skboffp = &skboff;
@@ -176,12 +176,22 @@ int kprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx, const struct sk_buf
 //  bpf_trace_printk("--------- offset: %u\n", offset);
   const struct sk_buff *skbp = NULL;
   bpf_probe_read(&skbp, sizeof(const struct sk_buff *), &skb);
-  bpf_trace_printk("_from_iter: kprobe [%u] ----- skbp: %p, skb: %p\n", pid_tgid, skbp, skb);
-  bpf_trace_printk("_from_iter: kprobe [%u] ----- offset: %d\n", pid_tgid, offset);
+  //bpf_trace_printk("_from_iter: kprobe [%u] ----- skbp: %p, skb: %p\n", pid_tgid, skbp, skb);
+  //bpf_trace_printk("_from_iter: kprobe [%u] ----- offset: %d\n", pid_tgid, offset);
 //  bpf_trace_printk("kprobe [%u] ----- skb->data: %p\n", pid_tgid, skb->data);
 
   currskb.update(&pid_tgid, &skb);
   curroff.update(&pid_tgid, &offset);
+
+  bpf_trace_printk("kprobe from_iter: skb=%p len=%d\n", skb, len);
+
+  unsigned char *data_ptr = NULL;
+  unsigned char *head_ptr = NULL;
+  bpf_probe_read(&data_ptr, sizeof(data_ptr), &skbp->data);
+  bpf_probe_read(&head_ptr, sizeof(head_ptr), &skbp->head);
+  currdata.update(&pid_tgid, &data_ptr);
+
+  bpf_trace_printk("kprobe data_ptr=%p head_ptr=%p diff=%p\n", data_ptr, head_ptr, data_ptr - head_ptr);
 
   return 0;
 }
@@ -215,7 +225,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   int ret = PT_REGS_RC(ctx);
   u64 pid_tgid = bpf_get_current_pid_tgid();
   struct sk_buff **skbpp = 0;
-  skbpp = (struct sk_buff **)currdata.lookup(&pid_tgid);
+  skbpp = (struct sk_buff **)currskb.lookup(&pid_tgid);
   int offset = -1;
   int *offsetp = 0;
   offsetp = (int *)curroff.lookup(&pid_tgid);
@@ -232,8 +242,6 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 
   struct sk_buff *skbp = NULL;
   bpf_probe_read(&skbp, sizeof(const struct sk_buff *), skbpp);
-  bpf_trace_printk("_from_iter: kretprobe [%u] ----- skbp: %p, skbpp: %p\n", pid_tgid, skbp, skbpp);
-  bpf_trace_printk("_from_iter: kretprobe [%u] ----- offset: %d\n", pid_tgid, offset);
 
   if (skbp == 0) {
 //    goto cleanup;
@@ -260,14 +268,17 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   bpf_probe_read(&skb_data_len, sizeof(unsigned int), &skbp->data_len);
 //  skb_data_len = skbp->data_len;
 
-  if (skb_data_len != 0) {
-//      bpf_trace_printk("skb_len: %u, skb_data_len: %u\nI", skb_len, skb_data_len);
-  }
+  bpf_trace_printk("_from_iter: kretprobe [%u] ----- skbp: %p, skbpp: %p\n", pid_tgid, skbp, skbpp);
+  bpf_trace_printk("_from_iter: kretprobe [%u] ----- offset: %d data_len=%d\n", pid_tgid, offset, skb_data_len);
 
-  if (skb_data_len < 12) {
+  //if (skb_data_len != 0) {
+//      bpf_trace_printk("skb_len: %u, skb_data_len: %u\nI", skb_len, skb_data_len);
+  //}
+
+  //if (skb_data_len < 12) {
 //    goto cleanup;
-    return 0;
-  }
+    //return 0;
+  //}
   /* Verify it's a TCP socket
      TODO: is it worth caching it in a socket table?
   */
@@ -313,15 +324,32 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
   */
 
   unsigned int available_data = head_len - offset;
-//  bpf_trace_printk("head_len: %u, offset: %u, available_data: %u\n", head_len, offset, available_data);
-  if (available_data < 12) {
+  bpf_trace_printk("head_len: %u, offset: %u, available_data: %u\n", head_len, offset, available_data);
+  //bpf_trace_printk("_from_iter: kretprobe avail: %u\n", available_data);
+  //if (available_data < 12) {
 //    goto cleanup;
-    return 0;
-  }
-//  bpf_trace_printk("available_data > 12\n");
+  //  return 0;
+  //}
+  //bpf_trace_printk("available_data > 12: head=%p data=%p\n", skbp->head, skbp->data);
 
 //  bpf_probe_read(&data, 12, skbp->data + offset);
-  bpf_probe_read(&data, 12, &skbp->data);
+  unsigned char **data_pp = NULL;
+  unsigned char *data_ptr = NULL;
+  unsigned char *head_ptr = NULL;
+
+  data_pp = (unsigned char**)currdata.lookup(&pid_tgid);
+  if (data_pp == NULL) {
+    return 0;
+  }
+
+  bpf_probe_read(&data_ptr, sizeof(void *), data_pp);
+  bpf_probe_read(&head_ptr, sizeof(head_ptr), &skbp->head);
+  bpf_trace_printk("kretprobe data_ptr=%p head_ptr=%p diff=%p\n", data_ptr, head_ptr, data_ptr - head_ptr);
+  if (data_ptr != NULL) {
+    bpf_probe_read(&data, 12, data_ptr);
+  } else {
+    bpf_trace_printk("data_ptr = NULL...\n");
+  }
 //  bpf_trace_printk("data: %s\n", data);
 //  bpf_trace_printk("kprobe [%u] ----- skbp->data: %p, &skbp->data: %p\n", pid_tgid, skbp->data, &skbp->data);
 
@@ -347,14 +375,11 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 //  for (i = 0; i < 8; i++) {
 //    bpf_trace_printk("data[%d]: %c\n", i, data[i]);
 //  }
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
-    bpf_trace_printk("data[%d]: %d\n", i, data[i]);i++;
+    //bpf_trace_printk("kretprobe data: %s\n", &data);
+    bpf_trace_printk("kretprobe data: %d %d\n", data[0], data[1]);
+    bpf_trace_printk("kretprobe data: %d %d\n", data[2], data[3]);
+
+    //bpf_trace_printk("kretprobe data[%d]: %d\n", i, data[i]);i++;
 
   switch (data[0]) {
     /* "HTTP/1.1 " */
@@ -365,7 +390,7 @@ int kretprobe__skb_copy_datagram_from_iter(struct pt_regs *ctx)
 //        bpf_trace_printk("[H]TTP/1.1 not found\n");
         return 0;
       }
-//      bpf_trace_printk("HTTP/1.1 FOUND!!!\n");
+      bpf_trace_printk("kretprobe: HTTP/1.1 FOUND!!!\n");
       break;
     default:
 //      bpf_trace_printk("HTTP/1.1 not found\n");
